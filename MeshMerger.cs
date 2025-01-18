@@ -12,9 +12,10 @@
 
     - If something goes wrong, press "Undo" button to undo changes (note, that all attached components will be lost, except for MeshRenderer, Transform and MeshFilter)
 
-    1.18.2025 (v.1.1) ...
+    1.18.2025 (v.1.11) ...
     - Generated meshes with high vertex count (>= 65536) will now use UInt32 index format
     - Added limitation of 128 materials per generated mesh
+    - Added per material objects merging
 
     1.8.2025 (v.1.0) 
 */
@@ -54,11 +55,11 @@ public class MeshMerger : EditorWindow {
     }
 
     public List<MeshElement> Elements = new();
+    public Dictionary<Material, List<int>> ElementsByMaterial = new();
 
     public string          Name = "Mesh";
     public bool            DestroyOriginalObjects = false;
     public bool            UndoAvailable = false;
-    public bool            SingleMaterial = false;
     public bool            ExtractMaterial = true;
     public Material        ExtractedMaterial;
     public float           ListItemHeight = 30f;
@@ -182,37 +183,12 @@ public class MeshMerger : EditorWindow {
 
         currentHeight += 20f;
 
-        // Single material box
-        if(GUI.Toggle(new Rect(20, currentHeight, 150, 20), SingleMaterial, "Single material")) {
-            SingleMaterial = true;
-        } else {
-            SingleMaterial = false;
-        }
-
-        // Custom material box
-        if(SingleMaterial) {
-            if(GUI.Toggle(new Rect(180, currentHeight, 150, 20), ExtractMaterial, "Extract material")) {
-                ExtractMaterial = true;
-            } else {
-                ExtractMaterial = false;
-            }
-
-            if(!ExtractMaterial) {
-                currentHeight += 25f;
-                var material = (Material)EditorGUI.ObjectField(new Rect(20, currentHeight, 150, 20),
-                                                               ExtractedMaterial, 
-                                                               typeof(Material), 
-                                                               false);
-
-                ExtractedMaterial = material;
-            }
-        }
-
-        currentHeight += 25f;
-
         // Meshes fetching
         if(GUI.Button(new Rect(20, currentHeight, 200, ListItemHeight), "Fetch selected meshes")) {
             Elements.Clear();
+            foreach(var list in ElementsByMaterial) {
+                list.Value.Clear();
+            }
             foreach (var transform in Selection.transforms) {
                 if(transform.TryGetComponent<MeshFilter>(out var meshFilter)) {
                     MeshElement element   = new();
@@ -240,7 +216,13 @@ public class MeshMerger : EditorWindow {
                         element.Dump.RenderingLayerMask = mr.renderingLayerMask;
                         element.Dump.ScaleInLightmap    = mr.scaleInLightmap;
                         element.Dump.StitchSeams        = mr.stitchLightmapSeams;
-
+                        
+                        if(ElementsByMaterial.ContainsKey(mr.sharedMaterial)) {
+                            ElementsByMaterial[mr.sharedMaterial].Add(Elements.Count);
+                        } else {
+                            ElementsByMaterial[mr.sharedMaterial] = new List<int>(128);
+                            ElementsByMaterial[mr.sharedMaterial].Add(Elements.Count);
+                        }
                         Elements.Add(element);
                     } else {
                         Debug.LogError("Transform has mesh filter but does not have MeshRenderer");
@@ -252,38 +234,52 @@ public class MeshMerger : EditorWindow {
         // Combine meshes
         if(GUI.Button(new Rect(230, currentHeight, 80, ListItemHeight), "Combine")) {
             SelectedObjects.Clear();
-            var mesh                  = new Mesh();
             var combineInstances      = new List<CombineInstance>();
-            var materials             = new List<Material>();
-            var vertexCount           = 0;
 
-            for(var i = 0; i < Elements.Count; ++i) {
-                var combineInstance = new CombineInstance();
+            foreach(var (material, list) in ElementsByMaterial) {
+                if(list.Count < 2)
+                    continue;
+                var mesh = new Mesh();
+                var vertexCount           = 0;
 
-                for(var subMesh = 0; subMesh < Elements[i].Mesh.subMeshCount; ++subMesh) {
-                    if(combineInstances.Count == 128) {
-                        CombineMesh(mesh, combineInstances.ToArray(), materials.ToArray());
-                        
-                        mesh = new Mesh();
-                        combineInstances.Clear();
-                        materials.Clear();
-                    }
+                for(var i = 0; i < list.Count; ++i) {
+                    var combineInstance = new CombineInstance();
 
-                    combineInstance.transform    = Elements[i].Transform.localToWorldMatrix;
-                    combineInstance.mesh         = Elements[i].Mesh;
-                    combineInstance.subMeshIndex = subMesh;
+                    for(var subMesh = 0; subMesh < Elements[list[i]].Mesh.subMeshCount; ++subMesh) {
+                        if(combineInstances.Count == 128) {
+                            CombineMesh(mesh, combineInstances.ToArray(), material);
+                            
+                            mesh = new Mesh();
+                            combineInstances.Clear();
+                        }
 
-                    combineInstances.Add(combineInstance);
-                    materials.Add(Elements[i].Renderer.sharedMaterials[subMesh]);
-                    vertexCount += Elements[i].Mesh.vertexCount;
+                        combineInstance.transform    = Elements[list[i]].Transform.localToWorldMatrix;
+                        combineInstance.mesh         = Elements[list[i]].Mesh;
+                        combineInstance.subMeshIndex = subMesh;
 
-                    if(vertexCount >= 65536) {
-                        mesh.indexFormat = IndexFormat.UInt32;
+                        combineInstances.Add(combineInstance);
+                        vertexCount += Elements[list[i]].Mesh.vertexCount;
+
+                        if(vertexCount >= 65536) {
+                            mesh.indexFormat = IndexFormat.UInt32;
+                        }
                     }
                 }
+                
+                if(combineInstances.Count > 0) {
+                    CombineMesh(mesh, combineInstances.ToArray(), material);
+                }
+
+                combineInstances.Clear();
             }
 
-            CombineMesh(mesh, combineInstances.ToArray(), materials.ToArray());
+            if(DestroyOriginalObjects) {
+                for(var i = 0; i < Elements.Count; ++i) {
+                    DestroyImmediate(Elements[i].GameObject);
+                }
+
+                UndoAvailable = true;
+            }
 
             Selection.objects = SelectedObjects.ToArray();
         }
@@ -338,24 +334,14 @@ public class MeshMerger : EditorWindow {
         GUI.EndScrollView();
     }
 
-    private void CombineMesh(Mesh mesh, CombineInstance[] combineInstances, Material[] materials) {
-        // mesh.indexFormat = IndexFormat.UInt32;
-        mesh.CombineMeshes(combineInstances, SingleMaterial, true);
+    private void CombineMesh(Mesh mesh, CombineInstance[] combineInstances, Material material) {
+        mesh.CombineMeshes(combineInstances, true, true);
 
         var go = new GameObject();
         var mf = go.AddComponent<MeshFilter>();
         var mr = go.AddComponent<MeshRenderer>();
 
-        if(SingleMaterial) {
-            if(!ExtractMaterial && ExtractedMaterial) {
-                mr.sharedMaterial = ExtractedMaterial;
-            } else {
-                mr.sharedMaterial = Elements[0].Material;
-            }
-        } else {
-            mr.sharedMaterials = materials;
-        }
-
+        mr.sharedMaterial = material;
         mf.mesh = mesh;
 
         if(string.IsNullOrEmpty(Name)) {
@@ -371,7 +357,7 @@ public class MeshMerger : EditorWindow {
             var goName = $"{Name}";
             var obj = AssetDatabase.LoadAssetAtPath(name, typeof(Mesh));
             if(obj) {
-                for(var i = 0; i < 999; ++i) {
+                for(var i = 0; i < 9999; ++i) {
                     name = $"{MeshesPath}/{Name} ({i}).mesh";
                     goName = $"{Name} ({i})";
 
@@ -390,13 +376,7 @@ public class MeshMerger : EditorWindow {
             AssetDatabase.CreateFolder(MergerPath, "GeneratedMeshes");
         }
 
-        if(DestroyOriginalObjects) {
-            for(var i = 0; i < Elements.Count; ++i) {
-                DestroyImmediate(Elements[i].GameObject);
-            }
-
-            UndoAvailable = true;
-        }
+        
 
         SelectedObjects.Add(go);
         // LastCreatedObject = go;
