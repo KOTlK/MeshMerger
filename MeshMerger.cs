@@ -12,6 +12,9 @@
 
     - If something goes wrong, press "Undo" button to undo changes (note, that all attached components will be lost, except for MeshRenderer, Transform and MeshFilter)
 
+    1.18.2025 (v.1.1) ...
+    - Generated meshes with high vertex count (>= 65536) will now use UInt32 index format
+    - Added limitation of 128 materials per generated mesh
 
     1.8.2025 (v.1.0) 
 */
@@ -52,6 +55,7 @@ public class MeshMerger : EditorWindow {
 
     public List<MeshElement> Elements = new();
 
+    public string          Name = "Mesh";
     public bool            DestroyOriginalObjects = false;
     public bool            UndoAvailable = false;
     public bool            SingleMaterial = false;
@@ -60,6 +64,13 @@ public class MeshMerger : EditorWindow {
     public float           ListItemHeight = 30f;
     public float           ListItemWidth  = 150f;
     public Vector2         ScrollPosition = Vector2.zero;
+
+    public readonly char[]  CharBuffer = new char[MaxLength];
+    public List<GameObject> SelectedObjects = new List<GameObject>();
+
+    public const int   MaxLength = 128;
+    public const string MergerPath = "Assets/MeshMerger";
+    public const string MeshesPath = "Assets/MeshMerger/GeneratedMeshes";
 
     public GameObject LastCreatedObject;
 
@@ -70,6 +81,46 @@ public class MeshMerger : EditorWindow {
 
     private void OnGUI () {
         var currentHeight = 20f;
+
+        GUI.Label(new Rect(20f, currentHeight, 80f, 20f), "Mesh name:");
+
+        var input = GUI.TextField(new Rect(100f, currentHeight, 150, 20f), Name);
+        var ptr = 0;
+        var maxLen = input.Length < MaxLength ? input.Length : MaxLength;
+        
+        for(var i = 0; i < maxLen; ++i) {
+            if(input[i] != '+' &&
+               input[i] != '*' &&
+               input[i] != '&' &&
+               input[i] != '^' &&
+               input[i] != '%' &&
+               input[i] != '$' &&
+               input[i] != '#' &&
+               input[i] != '@' &&
+               input[i] != '`' &&
+               input[i] != '"' &&
+               input[i] != '<' &&
+               input[i] != '>' &&
+               input[i] != ';' &&
+               input[i] != ':' &&
+               input[i] != '\'' &&
+               input[i] != '\\' &&
+               input[i] != '|' &&
+               input[i] != '/' &&
+               input[i] != '?' &&
+               input[i] != ',' &&
+               input[i] != '[' &&
+               input[i] != ']' &&
+               input[i] != '{' &&
+               input[i] != '}' &&
+               input[i] != '=') {
+                CharBuffer[ptr++] = input[i];
+            }
+        }
+
+        Name = new string(CharBuffer, 0, ptr);
+
+        currentHeight += 20f;
 
         // Destroy Original box
         if(GUI.Toggle(new Rect(20, currentHeight, 150, 20), 
@@ -113,6 +164,14 @@ public class MeshMerger : EditorWindow {
 
                 if(LastCreatedObject) {
                     DestroyImmediate(LastCreatedObject);
+                }
+
+                if(SelectedObjects.Count > 0) {
+                    for(var i = 0; i < SelectedObjects.Count; ++i) {
+                        DestroyImmediate(SelectedObjects[i]);
+                    }
+
+                    SelectedObjects.Clear();
                 }
 
                 Selection.objects = selectedObjects;
@@ -169,7 +228,6 @@ public class MeshMerger : EditorWindow {
                     if(transform.TryGetComponent<MeshRenderer>(out var mr)) {
                         element.Material = mr.sharedMaterial;
                         element.Renderer = mr;
-
                 
                         element.Dump.Flags              = GameObjectUtility.GetStaticEditorFlags(transform.gameObject);
                         element.Dump.ShadowCastingMode  = mr.shadowCastingMode;
@@ -193,58 +251,41 @@ public class MeshMerger : EditorWindow {
 
         // Combine meshes
         if(GUI.Button(new Rect(230, currentHeight, 80, ListItemHeight), "Combine")) {
-            var mesh             = new Mesh();
-            var combineInstances = new List<CombineInstance>(Elements.Count);
+            SelectedObjects.Clear();
+            var mesh                  = new Mesh();
+            var combineInstances      = new List<CombineInstance>();
+            var materials             = new List<Material>();
+            var vertexCount           = 0;
 
             for(var i = 0; i < Elements.Count; ++i) {
                 var combineInstance = new CombineInstance();
 
                 for(var subMesh = 0; subMesh < Elements[i].Mesh.subMeshCount; ++subMesh) {
+                    if(combineInstances.Count == 128) {
+                        CombineMesh(mesh, combineInstances.ToArray(), materials.ToArray());
+                        
+                        mesh = new Mesh();
+                        combineInstances.Clear();
+                        materials.Clear();
+                    }
+
                     combineInstance.transform    = Elements[i].Transform.localToWorldMatrix;
                     combineInstance.mesh         = Elements[i].Mesh;
                     combineInstance.subMeshIndex = subMesh;
 
                     combineInstances.Add(combineInstance);
-                }
-            }
+                    materials.Add(Elements[i].Renderer.sharedMaterials[subMesh]);
+                    vertexCount += Elements[i].Mesh.vertexCount;
 
-            mesh.CombineMeshes(combineInstances.ToArray(), SingleMaterial, true);
-
-            var go = new GameObject();
-            var mf = go.AddComponent<MeshFilter>();
-            var mr = go.AddComponent<MeshRenderer>();
-
-            if(SingleMaterial) {
-                if(!ExtractMaterial && ExtractedMaterial) {
-                    mr.sharedMaterial = ExtractedMaterial;
-                } else {
-                    mr.sharedMaterial = Elements[0].Material;
-                }
-            } else {
-                var materials = new Material[combineInstances.Count];
-                var materialIndex = 0;
-
-                for(var i = 0; i < Elements.Count; ++i) {
-                    for(var subMesh = 0; subMesh < Elements[i].Mesh.subMeshCount; ++subMesh) {
-                        materials[materialIndex++] = Elements[i].Renderer.sharedMaterials[subMesh];
+                    if(vertexCount >= 65536) {
+                        mesh.indexFormat = IndexFormat.UInt32;
                     }
                 }
-
-                mr.sharedMaterials = materials;
             }
 
-            mf.mesh = mesh;
+            CombineMesh(mesh, combineInstances.ToArray(), materials.ToArray());
 
-            if(DestroyOriginalObjects) {
-                for(var i = 0; i < Elements.Count; ++i) {
-                    DestroyImmediate(Elements[i].GameObject);
-                }
-
-                UndoAvailable = true;
-            }
-
-            Selection.activeTransform = go.transform;
-            LastCreatedObject = go;
+            Selection.objects = SelectedObjects.ToArray();
         }
 
         currentHeight += 35f;
@@ -295,5 +336,69 @@ public class MeshMerger : EditorWindow {
         }
 
         GUI.EndScrollView();
+    }
+
+    private void CombineMesh(Mesh mesh, CombineInstance[] combineInstances, Material[] materials) {
+        // mesh.indexFormat = IndexFormat.UInt32;
+        mesh.CombineMeshes(combineInstances, SingleMaterial, true);
+
+        var go = new GameObject();
+        var mf = go.AddComponent<MeshFilter>();
+        var mr = go.AddComponent<MeshRenderer>();
+
+        if(SingleMaterial) {
+            if(!ExtractMaterial && ExtractedMaterial) {
+                mr.sharedMaterial = ExtractedMaterial;
+            } else {
+                mr.sharedMaterial = Elements[0].Material;
+            }
+        } else {
+            mr.sharedMaterials = materials;
+        }
+
+        mf.mesh = mesh;
+
+        if(string.IsNullOrEmpty(Name)) {
+            Name = "Name";
+        }
+
+        if(!AssetDatabase.IsValidFolder(MergerPath)) {
+            AssetDatabase.CreateFolder("Assets", "MeshMerger");
+        }
+
+        if(AssetDatabase.IsValidFolder(MeshesPath)) {
+            var name = $"{MeshesPath}/{Name}.mesh";
+            var goName = $"{Name}";
+            var obj = AssetDatabase.LoadAssetAtPath(name, typeof(Mesh));
+            if(obj) {
+                for(var i = 0; i < 999; ++i) {
+                    name = $"{MeshesPath}/{Name} ({i}).mesh";
+                    goName = $"{Name} ({i})";
+
+                    obj = AssetDatabase.LoadAssetAtPath(name, typeof(Mesh));
+
+                    if(!obj)
+                        break;
+                }
+            }
+
+            go.name = goName;
+
+            AssetDatabase.CreateAsset(mesh, name);
+            AssetDatabase.SaveAssets();
+        } else {
+            AssetDatabase.CreateFolder(MergerPath, "GeneratedMeshes");
+        }
+
+        if(DestroyOriginalObjects) {
+            for(var i = 0; i < Elements.Count; ++i) {
+                DestroyImmediate(Elements[i].GameObject);
+            }
+
+            UndoAvailable = true;
+        }
+
+        SelectedObjects.Add(go);
+        // LastCreatedObject = go;
     }
 }
