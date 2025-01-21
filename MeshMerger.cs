@@ -12,6 +12,9 @@
 
     - If something goes wrong, press "Undo" button to undo changes (note, that all attached components will be lost, except for MeshRenderer, Transform and MeshFilter)
 
+    1.21.2025(v.1.12) ...
+    - Added basic support for nested meshes 
+
     1.18.2025 (v.1.11) ...
     - Generated meshes with high vertex count (>= 65536) will now use UInt32 index format
     - Added limitation of 128 materials per generated mesh
@@ -227,6 +230,50 @@ public class MeshMerger : EditorWindow {
                     } else {
                         Debug.LogError("Transform has mesh filter but does not have MeshRenderer");
                     }
+                } else {
+                    var meshFilters = transform.GetComponentsInChildren<MeshFilter>();
+
+                    foreach(Transform child in transform) {
+                        var mf = child.GetComponent<MeshFilter>();
+                        if(!mf) continue;
+
+                        MeshElement element   = new();
+                        element.GameObject    = child.gameObject;
+                        element.Mesh          = mf.sharedMesh;
+                        element.Transform     = child;
+                        element.Dump.Name     = child.gameObject.name;
+                        element.Dump.Position = child.position;
+                        element.Dump.Rotation = child.rotation;
+                        element.Dump.Scale    = child.localScale;
+                        element.Dump.IsStatic = child.gameObject.isStatic;
+
+                        if(child.TryGetComponent<MeshRenderer>(out var mr)) {
+                            element.Material = mr.sharedMaterial;
+                            element.Renderer = mr;
+                    
+                            element.Dump.Flags              = GameObjectUtility.GetStaticEditorFlags(child.gameObject);
+                            element.Dump.ShadowCastingMode  = mr.shadowCastingMode;
+                            element.Dump.StaticShadowCaster = mr.staticShadowCaster;
+                            element.Dump.ReceiveGI          = mr.receiveGI;
+                            element.Dump.LightProbeUsage    = mr.lightProbeUsage;
+                            element.Dump.ProbeAnchor        = mr.probeAnchor;
+                            element.Dump.MotionVectors      = mr.motionVectorGenerationMode;
+                            element.Dump.DynamicOcclusion   = mr.allowOcclusionWhenDynamic;
+                            element.Dump.RenderingLayerMask = mr.renderingLayerMask;
+                            element.Dump.ScaleInLightmap    = mr.scaleInLightmap;
+                            element.Dump.StitchSeams        = mr.stitchLightmapSeams;
+                            
+                            if(ElementsByMaterial.ContainsKey(mr.sharedMaterial)) {
+                                ElementsByMaterial[mr.sharedMaterial].Add(Elements.Count);
+                            } else {
+                                ElementsByMaterial[mr.sharedMaterial] = new List<int>(128);
+                                ElementsByMaterial[mr.sharedMaterial].Add(Elements.Count);
+                            }
+                            Elements.Add(element);
+                        } else {
+                            Debug.LogError("Transform has mesh filter but does not have MeshRenderer");
+                        }
+                    }
                 }
             }
         }
@@ -379,6 +426,5 @@ public class MeshMerger : EditorWindow {
         
 
         SelectedObjects.Add(go);
-        // LastCreatedObject = go;
     }
 }
