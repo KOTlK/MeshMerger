@@ -12,8 +12,9 @@
 
     - If something goes wrong, press "Undo" button to undo changes (note, that all attached components will be lost, except for MeshRenderer, Transform and MeshFilter)
 
-    1.21.2025(v.1.12) ...
-    - Added basic support for nested meshes 
+    1.24.2025 (v.1.12) ...
+    - Cleanup
+    - Added recursive meshes fetching. Now, if selected game objects have nested meshes, they will be merged as well.
 
     1.18.2025 (v.1.11) ...
     - Generated meshes with high vertex count (>= 65536) will now use UInt32 index format
@@ -192,89 +193,9 @@ public class MeshMerger : EditorWindow {
             foreach(var list in ElementsByMaterial) {
                 list.Value.Clear();
             }
+
             foreach (var transform in Selection.transforms) {
-                if(transform.TryGetComponent<MeshFilter>(out var meshFilter)) {
-                    MeshElement element   = new();
-                    element.GameObject    = transform.gameObject;
-                    element.Mesh          = meshFilter.sharedMesh;
-                    element.Transform     = transform;
-                    element.Dump.Name     = transform.gameObject.name;
-                    element.Dump.Position = transform.position;
-                    element.Dump.Rotation = transform.rotation;
-                    element.Dump.Scale    = transform.localScale;
-                    element.Dump.IsStatic = transform.gameObject.isStatic;
-
-                    if(transform.TryGetComponent<MeshRenderer>(out var mr)) {
-                        element.Material = mr.sharedMaterial;
-                        element.Renderer = mr;
-                
-                        element.Dump.Flags              = GameObjectUtility.GetStaticEditorFlags(transform.gameObject);
-                        element.Dump.ShadowCastingMode  = mr.shadowCastingMode;
-                        element.Dump.StaticShadowCaster = mr.staticShadowCaster;
-                        element.Dump.ReceiveGI          = mr.receiveGI;
-                        element.Dump.LightProbeUsage    = mr.lightProbeUsage;
-                        element.Dump.ProbeAnchor        = mr.probeAnchor;
-                        element.Dump.MotionVectors      = mr.motionVectorGenerationMode;
-                        element.Dump.DynamicOcclusion   = mr.allowOcclusionWhenDynamic;
-                        element.Dump.RenderingLayerMask = mr.renderingLayerMask;
-                        element.Dump.ScaleInLightmap    = mr.scaleInLightmap;
-                        element.Dump.StitchSeams        = mr.stitchLightmapSeams;
-                        
-                        if(ElementsByMaterial.ContainsKey(mr.sharedMaterial)) {
-                            ElementsByMaterial[mr.sharedMaterial].Add(Elements.Count);
-                        } else {
-                            ElementsByMaterial[mr.sharedMaterial] = new List<int>(128);
-                            ElementsByMaterial[mr.sharedMaterial].Add(Elements.Count);
-                        }
-                        Elements.Add(element);
-                    } else {
-                        Debug.LogError("Transform has mesh filter but does not have MeshRenderer");
-                    }
-                } else {
-                    var meshFilters = transform.GetComponentsInChildren<MeshFilter>();
-
-                    foreach(Transform child in transform) {
-                        var mf = child.GetComponent<MeshFilter>();
-                        if(!mf) continue;
-
-                        MeshElement element   = new();
-                        element.GameObject    = child.gameObject;
-                        element.Mesh          = mf.sharedMesh;
-                        element.Transform     = child;
-                        element.Dump.Name     = child.gameObject.name;
-                        element.Dump.Position = child.position;
-                        element.Dump.Rotation = child.rotation;
-                        element.Dump.Scale    = child.localScale;
-                        element.Dump.IsStatic = child.gameObject.isStatic;
-
-                        if(child.TryGetComponent<MeshRenderer>(out var mr)) {
-                            element.Material = mr.sharedMaterial;
-                            element.Renderer = mr;
-                    
-                            element.Dump.Flags              = GameObjectUtility.GetStaticEditorFlags(child.gameObject);
-                            element.Dump.ShadowCastingMode  = mr.shadowCastingMode;
-                            element.Dump.StaticShadowCaster = mr.staticShadowCaster;
-                            element.Dump.ReceiveGI          = mr.receiveGI;
-                            element.Dump.LightProbeUsage    = mr.lightProbeUsage;
-                            element.Dump.ProbeAnchor        = mr.probeAnchor;
-                            element.Dump.MotionVectors      = mr.motionVectorGenerationMode;
-                            element.Dump.DynamicOcclusion   = mr.allowOcclusionWhenDynamic;
-                            element.Dump.RenderingLayerMask = mr.renderingLayerMask;
-                            element.Dump.ScaleInLightmap    = mr.scaleInLightmap;
-                            element.Dump.StitchSeams        = mr.stitchLightmapSeams;
-                            
-                            if(ElementsByMaterial.ContainsKey(mr.sharedMaterial)) {
-                                ElementsByMaterial[mr.sharedMaterial].Add(Elements.Count);
-                            } else {
-                                ElementsByMaterial[mr.sharedMaterial] = new List<int>(128);
-                                ElementsByMaterial[mr.sharedMaterial].Add(Elements.Count);
-                            }
-                            Elements.Add(element);
-                        } else {
-                            Debug.LogError("Transform has mesh filter but does not have MeshRenderer");
-                        }
-                    }
-                }
+                FetchMeshRecursively(transform);
             }
         }
 
@@ -379,6 +300,55 @@ public class MeshMerger : EditorWindow {
         }
 
         GUI.EndScrollView();
+    }
+
+    private void FetchMeshRecursively(Transform transform) {
+        if(transform.TryGetComponent<MeshFilter>(out var meshFilter)) {
+            FetchMesh(transform, meshFilter);
+        }
+
+        foreach(Transform child in transform) {
+            FetchMeshRecursively(child);
+        }
+    }
+
+    private void FetchMesh(Transform transform, MeshFilter meshFilter) {
+        MeshElement element   = new();
+        element.GameObject    = transform.gameObject;
+        element.Mesh          = meshFilter.sharedMesh;
+        element.Transform     = transform;
+        element.Dump.Name     = transform.gameObject.name;
+        element.Dump.Position = transform.position;
+        element.Dump.Rotation = transform.rotation;
+        element.Dump.Scale    = transform.localScale;
+        element.Dump.IsStatic = transform.gameObject.isStatic;
+
+        if(transform.TryGetComponent<MeshRenderer>(out var mr)) {
+            element.Material = mr.sharedMaterial;
+            element.Renderer = mr;
+    
+            element.Dump.Flags              = GameObjectUtility.GetStaticEditorFlags(transform.gameObject);
+            element.Dump.ShadowCastingMode  = mr.shadowCastingMode;
+            element.Dump.StaticShadowCaster = mr.staticShadowCaster;
+            element.Dump.ReceiveGI          = mr.receiveGI;
+            element.Dump.LightProbeUsage    = mr.lightProbeUsage;
+            element.Dump.ProbeAnchor        = mr.probeAnchor;
+            element.Dump.MotionVectors      = mr.motionVectorGenerationMode;
+            element.Dump.DynamicOcclusion   = mr.allowOcclusionWhenDynamic;
+            element.Dump.RenderingLayerMask = mr.renderingLayerMask;
+            element.Dump.ScaleInLightmap    = mr.scaleInLightmap;
+            element.Dump.StitchSeams        = mr.stitchLightmapSeams;
+            
+            if(ElementsByMaterial.ContainsKey(mr.sharedMaterial)) {
+                ElementsByMaterial[mr.sharedMaterial].Add(Elements.Count);
+            } else {
+                ElementsByMaterial[mr.sharedMaterial] = new List<int>(128);
+                ElementsByMaterial[mr.sharedMaterial].Add(Elements.Count);
+            }
+            Elements.Add(element);
+        } else {
+            Debug.LogError("Transform has mesh filter but does not have MeshRenderer");
+        }
     }
 
     private void CombineMesh(Mesh mesh, CombineInstance[] combineInstances, Material material) {
